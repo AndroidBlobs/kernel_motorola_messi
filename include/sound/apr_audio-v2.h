@@ -3770,6 +3770,7 @@ struct afe_lpass_core_shared_clk_config_command {
 #define VPM_TX_DM_FLUENCE_COPP_TOPOLOGY			0x00010F72
 #define VPM_TX_QMIC_FLUENCE_COPP_TOPOLOGY		0x00010F75
 #define VPM_TX_DM_RFECNS_COPP_TOPOLOGY			0x00010F86
+#define VPM_TX_MOT_COPP_TOPOLOGY			0x1000E004
 #define ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX		0x10015002
 #define ADM_CMD_COPP_OPEN_TOPOLOGY_ID_AUDIOSPHERE	0x10028000
 
@@ -8685,10 +8686,11 @@ struct asm_eq_params {
 /*	Band cut equalizer effect.*/
 #define ASM_PARAM_EQ_BAND_CUT       6
 
-/* Get & set params */
-#define VSS_ICOMMON_CMD_SET_PARAM_V2	0x0001133D
-#define VSS_ICOMMON_CMD_GET_PARAM_V2	0x0001133E
-#define VSS_ICOMMON_RSP_GET_PARAM	0x00011008
+/* Voice get & set params */
+#define VOICE_CMD_SET_PARAM				0x0001133D
+#define VOICE_CMD_GET_PARAM				0x0001133E
+#define VOICE_EVT_GET_PARAM_ACK				0x00011008
+
 
 /** ID of the Bass Boost module.
     This module supports the following parameter IDs:
@@ -10794,6 +10796,13 @@ struct adm_param_fluence_sourcetracking_t {
 	uint16_t doa_noise[MAX_NOISE_SOURCE_INDICATORS];
 	uint8_t polar_activity[MAX_POLAR_ACTIVITY_INDICATORS];
 } __packed;
+
+#define ASM_STREAM_POSTPROC_TOPO_ID_MMIFX           0x1000E0C0
+#define AUDPROC_MODULE_ID_MMIFX                     0x1000E0B0
+#define AUDPROC_PARAM_ID_MMIFX_ENABLE               0x1000E3B0
+#define AUDPROC_PARAM_ID_MMIFX_PRESET               0x1000E3A0
+#define AUDPROC_PARAM_ID_MMIFX_TABLE                0x1000E300
+#define AUDPROC_PARAM_ID_MMIFX_DEVICE               0x1000E310
 
 #define AUDPROC_MODULE_ID_AUDIOSPHERE               0x00010916
 #define AUDPROC_PARAM_ID_AUDIOSPHERE_ENABLE         0x00010917
