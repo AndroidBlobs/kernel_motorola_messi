@@ -27,6 +27,12 @@
 #include <sound/audio_cal_utils.h>
 #include <sound/adsp_err.h>
 #include <linux/qdsp6v2/apr_tal.h>
+#ifdef CONFIG_SND_SOC_OPALUM
+#include <sound/ospl2xx.h>
+#endif
+#ifdef CONFIG_SND_SOC_TAS2560
+#include <sound/tas2560_algo.h>
+#endif
 
 #define WAKELOCK_TIMEOUT	5000
 enum {
@@ -130,6 +136,28 @@ static atomic_t afe_ports_mad_type[SLIMBUS_PORT_LAST - SLIMBUS_0_RX];
 static unsigned long afe_configured_cmd;
 
 static struct afe_ctl this_afe;
+
+#ifdef CONFIG_SND_SOC_OPALUM
+int32_t (*ospl2xx_callback)(struct apr_client_data *data);
+
+int ospl2xx_afe_set_callback(
+	int32_t (*ospl2xx_callback_func)(struct apr_client_data *data))
+{
+	ospl2xx_callback = ospl2xx_callback_func;
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_SND_SOC_TAS2560
+int32_t (*tas2560_algo_callback)(struct apr_client_data *data);
+
+int tas2560_algo_afe_set_callback(
+	int32_t (*tas2560_algo_callback_func)(struct apr_client_data *data))
+{
+	tas2560_algo_callback = tas2560_algo_callback_func;
+	return 0;
+}
+#endif
 
 #define TIMEOUT_MS 1000
 #define Q6AFE_MAX_VOLUME 0x3FFF
@@ -345,6 +373,25 @@ static int32_t afe_callback(struct apr_client_data *data, void *priv)
 	afe_callback_debug_print(data);
 	if (data->opcode == AFE_PORT_CMDRSP_GET_PARAM_V2) {
 		uint32_t *payload = data->payload;
+#if defined(CONFIG_SND_SOC_TAS2560)
+		int32_t *payload32 = data->payload;
+
+		if ((payload32[1] == AFE_TAS2560_ALGO_MODULE_RX) ||
+		     (payload32[1] == AFE_TAS2560_ALGO_MODULE_TX)) {
+			if (tas2560_algo_callback != NULL)
+				tas2560_algo_callback(data);
+			atomic_set(&this_afe.state, 0);
+		} else {
+#elif defined(CONFIG_SND_SOC_OPALUM)
+		int32_t *payload32 = data->payload;
+
+		if (payload32[1] == AFE_CUSTOM_OPALUM_RX_MODULE ||
+		    payload32[1] == AFE_CUSTOM_OPALUM_TX_MODULE) {
+			if (ospl2xx_callback != NULL)
+				ospl2xx_callback(data);
+			atomic_set(&this_afe.state, 0);
+		} else {
+#endif
 
 		if (!payload || (data->token >= AFE_MAX_PORTS)) {
 			pr_err("%s: Error: size %d payload %pK token %d\n",
@@ -365,6 +412,9 @@ static int32_t afe_callback(struct apr_client_data *data, void *priv)
 						 data->payload_size))
 				return -EINVAL;
 		}
+#if defined(CONFIG_SND_SOC_OPALUM) || defined(CONFIG_SND_SOC_TAS2560)
+		}
+#endif
 		wake_up(&this_afe.wait[data->token]);
 	} else if (data->payload_size) {
 		uint32_t *payload;
@@ -377,8 +427,14 @@ static int32_t afe_callback(struct apr_client_data *data, void *priv)
 			/* payload[1] contains the error status for response */
 			if (payload[1] != 0) {
 				atomic_set(&this_afe.status, payload[1]);
-				pr_err("%s: cmd = 0x%x returned error = 0x%x\n",
-					__func__, payload[0], payload[1]);
+				if (payload[0] == AFE_PORT_CMD_SET_PARAM_V2)
+					pr_debug("%s: cmd = 0x%x returned error = 0x%x\n",
+						__func__,
+						payload[0], payload[1]);
+				else
+					pr_err("%s: cmd = 0x%x returned error = 0x%x\n",
+						__func__,
+						payload[0], payload[1]);
 			}
 			switch (payload[0]) {
 			case AFE_PORT_CMD_SET_PARAM_V2:
@@ -717,6 +773,7 @@ int afe_q6_interface_prepare(void)
 static int afe_apr_send_pkt(void *data, wait_queue_head_t *wait)
 {
 	int ret;
+	struct afe_audioif_config_command_no_payload *afe_cal = data;
 
 	if (wait)
 		atomic_set(&this_afe.state, 1);
@@ -730,9 +787,19 @@ static int afe_apr_send_pkt(void *data, wait_queue_head_t *wait)
 			if (!ret) {
 				ret = -ETIMEDOUT;
 			} else if (atomic_read(&this_afe.status) > 0) {
-				pr_err("%s: DSP returned error[%s]\n", __func__,
-					adsp_err_get_err_str(atomic_read(
-					&this_afe.status)));
+				if (afe_cal->hdr.opcode ==
+				    AFE_PORT_CMD_SET_PARAM_V2)
+					pr_debug("%s: DSP returned error[%s]\n",
+						__func__,
+						adsp_err_get_err_str(
+							atomic_read(
+							&this_afe.status)));
+				else
+					pr_err("%s: DSP returned error[%s]\n",
+						__func__,
+						adsp_err_get_err_str(
+							atomic_read(
+							&this_afe.status)));
 				ret = adsp_err_get_lnx_err_code(
 						atomic_read(&this_afe.status));
 			} else {
@@ -751,6 +818,35 @@ static int afe_apr_send_pkt(void *data, wait_queue_head_t *wait)
 	return ret;
 }
 
+#ifdef CONFIG_SND_SOC_OPALUM
+int ospl2xx_afe_apr_send_pkt(void *data, int index)
+{
+	int ret = 0;
+
+	ret = afe_q6_interface_prepare();
+	if (ret != 0) {
+		pr_err("%s: Q6 interface prepare failed %d\n", __func__, ret);
+		return -EINVAL;
+	}
+	ret = afe_apr_send_pkt(data, &this_afe.wait[index]);
+	return ret;
+}
+#endif
+
+#ifdef CONFIG_SND_SOC_TAS2560
+int tas2560_algo_afe_apr_send_pkt(void *data, int index)
+{
+	int ret = 0;
+
+	ret = afe_q6_interface_prepare();
+	if (ret != 0) {
+		pr_err("%s: Q6 interface prepare failed %d\n", __func__, ret);
+		return -EINVAL;
+	}
+	ret = afe_apr_send_pkt(data, &this_afe.wait[index]);
+	return ret;
+}
+#endif
 static int afe_send_cal_block(u16 port_id, struct cal_block_data *cal_block)
 {
 	int						result = 0;
@@ -1058,7 +1154,7 @@ static int afe_spk_prot_prepare(int src_port, int dst_port, int param_id,
 		goto fail_cmd;
 	}
 	if (atomic_read(&this_afe.status) > 0) {
-		pr_err("%s: config cmd failed [%s]\n",
+		pr_debug("%s: config cmd failed [%s]\n",
 			__func__, adsp_err_get_err_str(
 			atomic_read(&this_afe.status)));
 		ret = adsp_err_get_lnx_err_code(
@@ -1348,7 +1444,7 @@ static int afe_get_cal_topology_id(u16 port_id, u32 *topology_id,
 	cal_block = afe_find_cal_topo_id_by_port(
 		this_afe.cal_data[cal_type_index], port_id);
 	if (cal_block == NULL) {
-		pr_err("%s: [AFE_TOPOLOGY_CAL] not initialized for this port %d\n",
+		pr_debug("%s: [AFE_TOPOLOGY_CAL] not initialized for this port %d\n",
 				__func__, port_id);
 		ret = -EINVAL;
 		goto unlock;
@@ -1425,7 +1521,7 @@ static int afe_send_port_topology_id(u16 port_id)
 
 	ret = afe_apr_send_pkt(&config, &this_afe.wait[index]);
 	if (ret) {
-		pr_err("%s: AFE set topology id enable for port 0x%x failed %d\n",
+		pr_debug("%s: AFE set topology id enable for port 0x%x failed %d\n",
 			__func__, port_id, ret);
 		goto done;
 	}

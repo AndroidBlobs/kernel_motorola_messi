@@ -149,9 +149,6 @@ static int msm_routing_get_bit_width(unsigned int format)
 	int bit_width;
 
 	switch (format) {
-	case SNDRV_PCM_FORMAT_S32_LE:
-		bit_width = 32;
-		break;
 	case SNDRV_PCM_FORMAT_S24_LE:
 	case SNDRV_PCM_FORMAT_S24_3LE:
 		bit_width = 24;
@@ -1143,6 +1140,7 @@ int msm_pcm_routing_reg_phy_compr_stream(int fe_id, int perf_mode,
 	fe_dai_map[fe_id][session_type].strm_id = dspst_id;
 	/* re-enable EQ if active */
 	msm_qti_pp_send_eq_values(fe_id);
+	msm_qti_pp_mmfx_eq_send_eq_values(fe_id);
 	for (i = 0; i < MSM_BACKEND_DAI_MAX; i++) {
 		if (test_bit(fe_id, &msm_bedais[i].fe_sessions[0]))
 			msm_bedais[i].passthr_mode[fe_id] = passthr_mode;
@@ -1395,6 +1393,7 @@ int msm_pcm_routing_reg_phy_stream(int fedai_id, int perf_mode,
 
 	/* re-enable EQ if active */
 	msm_qti_pp_send_eq_values(fedai_id);
+	msm_qti_pp_mmfx_eq_send_eq_values(fedai_id);
 	for (i = 0; i < MSM_BACKEND_DAI_MAX; i++) {
 		if (!is_be_dai_extproc(i) &&
 		   (afe_get_port_type(msm_bedais[i].port_id) == port_type) &&
@@ -1879,7 +1878,6 @@ static void msm_pcm_routing_process_voice(u16 reg, u16 val, int set)
 {
 	u32 session_id = 0;
 	u16 path_type;
-	struct media_format_info voc_be_media_format;
 
 	pr_debug("%s: reg %x val %x set %x\n", __func__, reg, val, set);
 
@@ -1912,22 +1910,8 @@ static void msm_pcm_routing_process_voice(u16 reg, u16 val, int set)
 	if (set) {
 		if (msm_bedais[reg].active) {
 			voc_set_route_flag(session_id, path_type, 1);
-
-			memset(&voc_be_media_format, 0,
-			       sizeof(struct media_format_info));
-
-			voc_be_media_format.port_id = msm_bedais[reg].port_id;
-			voc_be_media_format.num_channels =
-						msm_bedais[reg].channel;
-			voc_be_media_format.sample_rate =
-						msm_bedais[reg].sample_rate;
-			voc_be_media_format.bits_per_sample =
-						msm_bedais[reg].format;
-			/* Defaulting this to 1 for voice call usecases */
-			voc_be_media_format.channel_mapping[0] = 1;
-
 			voc_set_device_config(session_id, path_type,
-					      &voc_be_media_format);
+			   msm_bedais[reg].channel, msm_bedais[reg].port_id);
 
 			if (voc_get_route_flag(session_id, TX_PATH) &&
 				voc_get_route_flag(session_id, RX_PATH))
@@ -3619,6 +3603,10 @@ static int msm_routing_ec_ref_rx_put(struct snd_kcontrol *kcontrol,
 		msm_route_ec_ref_rx = 22;
 		ec_ref_port_id = AFE_PORT_ID_INT3_MI2S_TX;
 		break;
+	case 23:
+		msm_route_ec_ref_rx = 23;
+		ec_ref_port_id = SLIMBUS_3_TX;
+		break;
 	default:
 		msm_route_ec_ref_rx = 0; /* NONE */
 		pr_err("%s EC ref rx %ld not valid\n",
@@ -3641,7 +3629,7 @@ static const char *const ec_ref_rx[] = { "None", "SLIM_RX", "I2S_RX",
 	"SLIM_5_RX", "SLIM_1_TX", "QUAT_TDM_TX_1",
 	"QUAT_TDM_RX_0", "QUAT_TDM_RX_1", "QUAT_TDM_RX_2", "SLIM_6_RX",
 	"TERT_MI2S_RX", "QUAT_MI2S_RX", "TERT_TDM_TX_0", "USB_AUDIO_RX",
-	"INT0_MI2S_RX", "INT4_MI2S_RX", "INT3_MI2S_TX"};
+	"INT0_MI2S_RX", "INT4_MI2S_RX", "INT3_MI2S_TX", "SLIM_3_TX"};
 
 static const struct soc_enum msm_route_ec_ref_rx_enum[] = {
 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(ec_ref_rx), ec_ref_rx),
@@ -3758,6 +3746,9 @@ static int msm_routing_ext_ec_put(struct snd_kcontrol *kcontrol,
 	case EXT_EC_REF_SLIM_1_TX:
 		ext_ec_ref_port_id = SLIMBUS_1_TX;
 		break;
+	case EXT_EC_REF_SLIM_3_TX:
+		ext_ec_ref_port_id = SLIMBUS_3_TX;
+		break;
 	case EXT_EC_REF_NONE:
 	default:
 		ext_ec_ref_port_id = AFE_PORT_INVALID;
@@ -3766,9 +3757,9 @@ static int msm_routing_ext_ec_put(struct snd_kcontrol *kcontrol,
 	}
 
 	pr_debug("%s: val = %d ext_ec_ref_port_id = 0x%0x state = %d\n",
-		 __func__, msm_route_ext_ec_ref, ext_ec_ref_port_id, state);
+		__func__, msm_route_ext_ec_ref, ext_ec_ref_port_id, state);
 
-	if (!voc_set_ext_ec_ref_port_id(ext_ec_ref_port_id, state)) {
+	if (!voc_set_ext_ec_ref(ext_ec_ref_port_id, state)) {
 		mutex_unlock(&routing_lock);
 		snd_soc_dapm_mux_update_power(widget->dapm, kcontrol, mux, e, update);
 	} else {
@@ -3781,7 +3772,7 @@ static int msm_routing_ext_ec_put(struct snd_kcontrol *kcontrol,
 static const char * const ext_ec_ref_rx[] = {"NONE", "PRI_MI2S_TX",
 					"SEC_MI2S_TX", "TERT_MI2S_TX",
 					"QUAT_MI2S_TX", "QUIN_MI2S_TX",
-					"SLIM_1_TX"};
+					"SLIM_1_TX", "SLIM_3_TX"};
 
 static const struct soc_enum msm_route_ext_ec_ref_rx_enum[] = {
 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(ext_ec_ref_rx), ext_ec_ref_rx),
@@ -4381,11 +4372,17 @@ static const struct snd_kcontrol_new tertiary_mi2s_rx_mixer_controls[] = {
 	SOC_SINGLE_EXT("MultiMedia5", MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
 	MSM_FRONTEND_DAI_MULTIMEDIA5, 1, 0, msm_routing_get_audio_mixer,
 	msm_routing_put_audio_mixer),
+	SOC_SINGLE_EXT("MultiMedia6", MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
+	MSM_FRONTEND_DAI_MULTIMEDIA6, 1, 0, msm_routing_get_audio_mixer,
+	msm_routing_put_audio_mixer),
 	SOC_SINGLE_EXT("MultiMedia7", MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
 	MSM_FRONTEND_DAI_MULTIMEDIA7, 1, 0, msm_routing_get_audio_mixer,
 	msm_routing_put_audio_mixer),
 	SOC_SINGLE_EXT("MultiMedia8", MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
 	MSM_FRONTEND_DAI_MULTIMEDIA8, 1, 0, msm_routing_get_audio_mixer,
+	msm_routing_put_audio_mixer),
+	SOC_SINGLE_EXT("MultiMedia9", MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
+	MSM_FRONTEND_DAI_MULTIMEDIA9, 1, 0, msm_routing_get_audio_mixer,
 	msm_routing_put_audio_mixer),
 	SOC_SINGLE_EXT("MultiMedia10", MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
 	MSM_FRONTEND_DAI_MULTIMEDIA10, 1, 0, msm_routing_get_audio_mixer,
@@ -14543,6 +14540,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"VOC_EXT_EC MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"VOC_EXT_EC MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
 	{"VOC_EXT_EC MUX", "SLIM_1_TX" ,    "SLIMBUS_1_TX"},
+	{"VOC_EXT_EC MUX", "SLIM_3_TX" ,    "SLIMBUS_3_TX"},
 	{"CS-VOICE_UL1", NULL, "VOC_EXT_EC MUX"},
 	{"VOIP_UL", NULL, "VOC_EXT_EC MUX"},
 	{"VoLTE_UL", NULL, "VOC_EXT_EC MUX"},
@@ -14556,6 +14554,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"AUDIO_REF_EC_UL1 MUX", "TERT_MI2S_TX" , "TERT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_MI2S_TX" , "QUAT_MI2S_TX"},
 	{"AUDIO_REF_EC_UL1 MUX", "SLIM_1_TX" , "SLIMBUS_1_TX"},
+	{"AUDIO_REF_EC_UL1 MUX", "SLIM_3_TX" , "SLIMBUS_3_TX"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_TDM_TX_1" , "QUAT_TDM_TX_1"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_TDM_RX_0" , "QUAT_TDM_RX_0"},
 	{"AUDIO_REF_EC_UL1 MUX", "QUAT_TDM_RX_1" , "QUAT_TDM_RX_1"},
@@ -15333,6 +15332,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"VoLTE Stub Tx Mixer", "SLIM_8_TX", "SLIMBUS_8_TX"},
 	{"VoLTE Stub Tx Mixer", "AFE_PCM_TX", "PCM_TX"},
 	{"VoLTE Stub Tx Mixer", "PRI_MI2S_TX", "PRI_MI2S_TX"},
+	{"VoLTE Stub Tx Mixer", "TERT_MI2S_TX", "TERT_MI2S_TX"},
 	{"VoLTE Stub Tx Mixer", "QUAT_MI2S_TX", "QUAT_MI2S_TX"},
 	{"VOLTE_STUB_UL", NULL, "VoLTE Stub Tx Mixer"},
 
@@ -15346,6 +15346,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"Voice2 Stub Tx Mixer", "SLIM_8_TX", "SLIMBUS_8_TX"},
 	{"Voice2 Stub Tx Mixer", "AFE_PCM_TX", "PCM_TX"},
 	{"Voice2 Stub Tx Mixer", "PRI_MI2S_TX", "PRI_MI2S_TX"},
+	{"Voice2 Stub Tx Mixer", "TERT_MI2S_TX", "TERT_MI2S_TX"},
 	{"Voice2 Stub Tx Mixer", "QUAT_MI2S_TX", "QUAT_MI2S_TX"},
 	{"VOICE2_STUB_UL", NULL, "Voice2 Stub Tx Mixer"},
 
@@ -15686,7 +15687,6 @@ static int msm_pcm_routing_prepare(struct snd_pcm_substream *substream)
 	uint16_t bits_per_sample = 16, voc_path_type;
 	struct msm_pcm_routing_fdai_data *fdai;
 	u32 session_id;
-	struct media_format_info voc_be_media_format;
 	bool is_lsm;
 
 	pr_debug("%s: substream->pcm->id:%s\n",
@@ -15814,8 +15814,8 @@ static int msm_pcm_routing_prepare(struct snd_pcm_substream *substream)
 	for_each_set_bit(i, &bedai->fe_sessions[0], MSM_FRONTEND_DAI_MAX) {
 		session_id = msm_pcm_routing_get_voc_sessionid(i);
 		if (session_id) {
-			pr_debug("%s voice session_id: 0x%x\n", __func__,
-				 session_id);
+			pr_debug("%s voice session_id: 0x%x",
+				 __func__, session_id);
 
 			if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 				voc_path_type = RX_PATH;
@@ -15823,45 +15823,13 @@ static int msm_pcm_routing_prepare(struct snd_pcm_substream *substream)
 				voc_path_type = TX_PATH;
 
 			voc_set_route_flag(session_id, voc_path_type, 1);
-
-			memset(&voc_be_media_format, 0,
-			       sizeof(struct media_format_info));
-
-			voc_be_media_format.port_id = bedai->port_id;
-			voc_be_media_format.num_channels = bedai->channel;
-			voc_be_media_format.sample_rate = bedai->sample_rate;
-			voc_be_media_format.bits_per_sample = bedai->format;
-			/* Defaulting this to 1 for voice call usecases */
-			voc_be_media_format.channel_mapping[0] = 1;
-
-			voc_set_device_config(session_id, voc_path_type,
-					      &voc_be_media_format);
+			voc_set_device_config(session_id,  voc_path_type,
+					      bedai->channel, bedai->port_id);
 
 			if (voc_get_route_flag(session_id, RX_PATH) &&
 				voc_get_route_flag(session_id, TX_PATH))
 					voc_enable_device(session_id);
 		}
-	}
-
-	/* Check if backend is an external ec ref port and set as needed */
-	if (unlikely(bedai->port_id == voc_get_ext_ec_ref_port_id())) {
-
-		memset(&voc_be_media_format, 0,
-		       sizeof(struct media_format_info));
-
-		/* Get format info for ec ref port from msm_bedais[] */
-		voc_be_media_format.port_id = bedai->port_id;
-		voc_be_media_format.num_channels = bedai->channel;
-		voc_be_media_format.bits_per_sample = bedai->format;
-		voc_be_media_format.sample_rate = bedai->sample_rate;
-		/* Defaulting this to 1 for voice call usecases */
-		voc_be_media_format.channel_mapping[0] = 1;
-		voc_set_ext_ec_ref_media_fmt_info(&voc_be_media_format);
-		pr_debug("%s: EC Ref media format info set to port_id=%d, num_channels=%d, bits_per_sample=%d, sample_rate=%d\n",
-			 __func__, voc_be_media_format.port_id,
-			 voc_be_media_format.num_channels,
-			 voc_be_media_format.bits_per_sample,
-			 voc_be_media_format.sample_rate);
 	}
 
 done:
@@ -16082,8 +16050,8 @@ static int msm_routing_be_dai_name_table_info(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static int msm_routing_be_dai_name_table_tlv_get(unsigned int __user *bytes,
-						 unsigned int size)
+static int msm_routing_be_dai_name_table_tlv_get(struct snd_kcontrol *kcontrol,
+					unsigned int __user *bytes, unsigned int size)
 {
 	int i;
 	int ret;
